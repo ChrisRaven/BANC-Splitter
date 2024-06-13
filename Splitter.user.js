@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Splitter for BANC
-// @namespace    KrzysztofKruk-FlyWire
+// @namespace    KrzysztofKruk-BANC
 // @version      0.2
 // @description  Splits large list of IDs to more managable batches
 // @author       Krzysztof Kruk
