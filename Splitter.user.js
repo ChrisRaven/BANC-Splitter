@@ -49,7 +49,7 @@ function addCss() {
       height: 90px;
       font-size: 18px;
       position: relative;
-      top: 2px;
+      top: -9px;
     }
 
     #kk-splitter-next-batch:hover,
