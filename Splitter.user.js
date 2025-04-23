@@ -12,26 +12,32 @@
 // @downloadURL  https://raw.githubusercontent.com/ChrisRaven/BANC-Splitter/main/Splitter.user.js
 // @homepageURL  https://github.com/ChrisRaven/BANC-Splitter
 // ==/UserScript==
-/*global Dock, BigInt*/
+/*global Dock, BigInt, viewer */
 /*eslint no-return-assign: "off"*/
 
 let storage
+let currentPosition = 0
 let batchSize = 20
-let numberOfStored = 0
 let numberOfSaved = 0
 let refreshEvery = 100
+let ids = []
+
 function addCss() {
   Dock.addCss(/*css*/`
     /* "Next" button */
     #kk-splitter-next-wrapper {
       position: absolute;
       z-index: 50;
-      width: 250px;
+      width: 220px;
       height: 90px;
+      display: flex;
+      flex-direction: row;
+      align-items: stretch;
     }
 
     #kk-splitter-next-batch,
-    #kk-splitter-save-left {
+    #kk-splitter-save-left,
+    #kk-splitter-prev {
       background-color: #449;
       color: orange;
       font-size: 28px;
@@ -40,20 +46,29 @@ function addCss() {
     }
 
     #kk-splitter-next-batch {
-      width: 150px;
+      width: 130px;
       height: 90px;
+      flex: 1;
     }
 
-    #kk-splitter-save-left {
-      width: 60px;
+    #kk-splitter-save-left,
+    #kk-splitter-prev {
+      width: 80px;
       height: 90px;
       font-size: 18px;
       position: relative;
+    }
+
+    #kk-side-column {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
       top: -9px;
     }
 
     #kk-splitter-next-batch:hover,
-    #kk-splitter-save-left:hover {
+    #kk-splitter-save-left:hover,
+    #kk-splitter-prev:hover {
       background-color: #669;
     }
 
@@ -124,6 +139,20 @@ function addCss() {
   `)
 }
 
+const observer = new MutationObserver(() => {
+  const el = document.getElementById('neuroglancer-status-container');
+  if (el) {
+    const text = el.textContent || "";
+    if (text.includes('Hid ') || text.includes('Deselected ')) {
+      el.style.display = 'none';
+    } else {
+      el.style.display = '';
+    }
+  }
+});
+
+observer.observe(document.body, { childList: true, subtree: true });
+
 
 document.addEventListener('dock-ready', () => {
   addCss()
@@ -139,8 +168,9 @@ if (!document.getElementById('dock-script')) {
 }
 
 // on the Next button
-function setTotalLength(ids) {
-  document.querySelector('#kk-splitter-next-batch-total-counter').textContent = `[${Math.ceil(ids.length / batchSize)}]`
+function setStillToDo(clear = false) {
+  const newValue = clear ? 0 : Math.ceil((ids.length - currentPosition) / batchSize)
+  document.querySelector('#kk-splitter-next-batch-total-counter').textContent = `[${newValue}]`
 }
 
 function addNextButton() {
@@ -148,10 +178,18 @@ function addNextButton() {
   nextButtonWrapper.id = 'kk-splitter-next-wrapper'
   nextButtonWrapper.draggable = true
 
+  const prevButton = document.createElement('button')
+  prevButton.id = 'kk-splitter-prev'
+  prevButton.innerHTML = 'Prev'
+  prevButton.addEventListener('contextmenu', e => e.preventDefault())
+
   const nextButton = document.createElement('button')
   nextButton.id = 'kk-splitter-next-batch'
   nextButton.innerHTML = 'Next (<span id="kk-splitter-next-batch-batch-number">0</span>)<br /><span id="kk-splitter-next-batch-total-counter">[?]</span>'
   nextButton.addEventListener('contextmenu', e => e.preventDefault())
+
+  const sideColumn = document.createElement('div')
+  sideColumn.id = 'kk-side-column'
 
   const saveLeftButton = document.createElement('button')
   saveLeftButton.id = 'kk-splitter-save-left'
@@ -159,7 +197,9 @@ function addNextButton() {
   saveLeftButton.addEventListener('contextmenu', e => e.preventDefault())
 
   nextButtonWrapper.appendChild(nextButton)
-  nextButtonWrapper.appendChild(saveLeftButton)
+  nextButtonWrapper.appendChild(sideColumn)
+  sideColumn.appendChild(prevButton)
+  sideColumn.appendChild(saveLeftButton)
   document.body.appendChild(nextButtonWrapper)
 
   storage.get('kk-splitter-next-button-position').then(res => {
@@ -180,97 +220,90 @@ function addNextButton() {
 
   let clickCounter = 0
 
-  storage.get('kk-splitter-stored').then(res => {
-    let ids = res['kk-splitter-stored'] || []
-    setTotalLength(ids)
-  })
-
   function refresh() {
-    // .querySelectorAll() to create a static NodeList of segments and be able to remove them without any problems
-    // .getElementsByClassName() to create a live NodeList and be able to check it changing length
-    document.querySelectorAll('.segment-button').forEach(seg => seg.click())
-    const segments = document.getElementsByClassName('segment-button')
-    setInterval(() => {
-      if (!segments.length) {
-        localStorage.setItem('clickNext', true)
-        setTimeout(() => window.location.reload(), 500)
+    viewer.selectedLayer.layer_.layer_.displayState.segmentationGroupState.value.selectedSegments.clear()
+    localStorage.setItem('clickNext', true)
+    setTimeout(() => window.location.reload(), 0) // TODO: check if still necessary to timeout
+  }
+
+  function addIds(layer, ids) {
+    layer.layer_.displayState.segmentationGroupState.value.selectedSegments.clear()
+    layer.layer_.displayState.segmentationGroupState.value.selectedSegments.add(ids)
+    layer.layer_.displayState.segmentationGroupState.value.visibleSegments.add(ids)
+  }
+
+  function getCurrentBatch() {
+    const currentEndPosition = currentPosition + batchSize
+    const batch = ids.slice(currentPosition, currentEndPosition)
+
+    viewer.selectedLayer.layer_.layer_.displayState.segmentationGroupState.value.selectedSegments.clear()
+
+    if (!batch.length) {
+      return Dock.dialog({
+        id: 'kk-splitter-no-ids',
+        html: 'All IDs have been checked',
+        destroyAfterClosing: true,
+        okLabel: 'OK',
+        okCallback: () => {}
+      }).show()
+
+    }
+    else {
+      const numberOfPreloadedBatches = 2
+      setStillToDo()
+      const nextBatch = ids.slice(currentEndPosition, currentEndPosition + batchSize * numberOfPreloadedBatches) // preloading dla dwóch następnych porcji
+      hiddenLayer.layer_.displayState.segmentationGroupState.value.selectedSegments.clear()
+      if (nextBatch && nextBatch.length && clickCounter + numberOfPreloadedBatches <= refreshEvery) {
+        addIds(hiddenLayer, nextBatch)
       }
-    }, 100)
+      addIds(viewer.selectedLayer.layer_, batch)
+    }
+
+    currentPosition += batchSize
+    storage.set('kk-splitter-current-position', currentPosition)
+    setStillToDo()
+    document.getElementById('kk-splitter-next-batch-batch-number').textContent = clickCounter
   }
 
   nextButton.addEventListener('click', e => {
-    const statusBar = document.querySelectorAll('.neuroglancer-segment-list-status')[1]
-    statusBar.getElementsByClassName('neuroglancer-star-icon')[0].click() // remove all segments from the right-hand list
     if (clickCounter === refreshEvery) {
       return refresh()
     }
     clickCounter++
-    document.getElementById('kk-splitter-next-batch-batch-number').textContent = clickCounter
+    getCurrentBatch()
+  })
 
-    storage.get('kk-splitter-stored').then(res => {
-      let ids = res['kk-splitter-stored'] || []
-      getCb(ids)
-    })
-
-    function getCb(ids) {
-      const batch = ids.splice(0, batchSize)
-
-      if (!batch.length) {
-        return Dock.dialog({
-          id: 'kk-splitter-no-ids',
-          html: 'All IDs have been checked',
-          destroyAfterClosing: true,
-          okLabel: 'OK',
-          okCallback: () => {}
-        }).show()
-      }
-      else {
-        setTotalLength(ids)
-        numberOfStored = ids.length
-      }
-
-      const addSegmentsInput = document.querySelector('.neuroglancer-segment-list-query')
-
-      function changeAddSegmentsInput(value) {
-          addSegmentsInput.value = value
-          addSegmentsInput.dispatchEvent(new KeyboardEvent('keydown', {code: 'Enter' }))
-      }
-
-      changeAddSegmentsInput(batch.join(','))
-      changeAddSegmentsInput('')
-
-
-      storage.set('kk-splitter-stored', ids).then(() => {
-        numberOfStored = ids.length
-      })
+  prevButton.addEventListener('click', e => {
+    currentPosition -= batchSize * 2
+    if (currentPosition < 0) {
+      currentPosition = 0
+      // we have to save the currentPosition only here, because in the other branch, the getCurrentBatch() will already do it for us
+      storage.set('kk-splitter-current-position', currentPosition)
+    }
+    else {
+      clickCounter--
+      getCurrentBatch()
     }
   })
-  if (localStorage.getItem('clickNext') === 'true') {
-    localStorage.setItem('clickNext', false)
-    nextButton.click()
-  }
-
 
   saveLeftButton.addEventListener('click', () => {
     const newIds = []
     const segments = document.querySelectorAll('.neuroglancer-segment-list-entry-id')
     segments.forEach(seg => newIds.push(seg.innerText))
-    let ids = []
+    let savedIds = []
 
     if (!newIds || !newIds.length) return
 
     storage.get('kk-splitter-saved').then(res => {
-      ids = res['kk-splitter-saved'] || []
-      let batch = newIds.splice(0, 10000)
-      do {
-      ids.push(...batch)
-      batch = newIds.splice(0, 10000)
-      }
-      while (batch.length > 0)
+      savedIds = res['kk-splitter-saved'] || []
 
-      storage.set('kk-splitter-saved', ids).then(() => {
+      let batch
+      while ((batch = newIds.splice(0, 10000)).length) {
+        savedIds.push(...batch)
+      }
+
+      storage.set('kk-splitter-saved', savedIds).then(() => {
         segments.forEach(seg => seg.click())
-        numberOfSaved = ids.length
       })
     })
   })
@@ -308,6 +341,7 @@ function addNextButton() {
   })
 }
 
+let hiddenLayer
 
 function getIds(id) {
   let ids = document.getElementById(id).value
@@ -318,6 +352,13 @@ function getIds(id) {
 function main() {
   let dock = new Dock()
   storage = window.Sifrr.Storage.getStorage('indexeddb')
+
+  storage.get('kk-splitter-current-position').then(res => {
+    let curPos = res['kk-splitter-current-position']
+    if (curPos) {
+      currentPosition = curPos
+    }
+  })
 
   storage.get('kk-splitter-batch-size').then(res => {
     let size = res['kk-splitter-batch-size']
@@ -336,7 +377,18 @@ function main() {
   storage.get('kk-splitter-stored').then(res => {
     let stored = res['kk-splitter-stored']
     if (stored) {
-      numberOfStored = stored.length
+      ids = stored
+      setStillToDo()
+
+      if (localStorage.getItem('clickNext') === 'true') {
+        localStorage.setItem('clickNext', false)
+        const checkForLayer = setInterval(() => {
+          if (viewer && viewer.selectedLayer && viewer.selectedLayer.layer_.layer_.displayState) {
+            clearInterval(checkForLayer)
+            document.getElementById('kk-splitter-next-batch').click()
+          }
+        }, 100)
+      }
     }
   })
 
@@ -346,6 +398,17 @@ function main() {
       numberOfSaved = saved.length
     }
   })
+
+  const checkForViewer = setInterval(() => {
+    if (!viewer) return
+
+    clearInterval(checkForViewer)
+    initHiddenLayer()
+  }, 100)
+
+  function initHiddenLayer() {
+    hiddenLayer = viewer.layerManager.getLayerByName(' ')
+  }
 
   dock.addAddon({
     name: 'Splitter',
@@ -384,9 +447,8 @@ function main() {
     `
   }
 
-  function setStoredCounter(val) {
-    document.getElementById('kk-splitter-stored-counter').textContent = val
-    numberOfStored = val
+  function setTotalLength() {
+    document.getElementById('kk-splitter-stored-counter').textContent = ids.length
   }
 
   function setSavedCounter(val) {
@@ -397,7 +459,7 @@ function main() {
   function setInitialValues() {
     document.getElementById('kk-splitter-batch-size').value = batchSize
     document.getElementById('kk-splitter-refresh-every').value = refreshEvery
-    setStoredCounter(numberOfStored)
+    setTotalLength()
     setSavedCounter(numberOfSaved)
   }
 
@@ -439,23 +501,23 @@ function main() {
 
 
     document.getElementById('kk-splitter-add').addEventListener('click', () => {
-      const ids = getIds('kk-splitter-input')
+      const newIds = getIds('kk-splitter-input')
+      ids = [...newIds]
       let stored
       storage.get('kk-splitter-stored').then(res => {
         stored = res['kk-splitter-stored'] || []
 
-        let batch = ids.splice(0, 10000)
+        let batch = newIds.splice(0, 10000)
         do {
         stored.push(...batch)
-        batch = ids.splice(0, 10000)
+        batch = newIds.splice(0, 10000)
         }
         while (batch.length > 0)
 
         storage.set('kk-splitter-stored', stored)
       }).then(() => {
-        numberOfStored = stored.length
-        setStoredCounter(stored.length)
-        setTotalLength(stored)
+        setTotalLength()
+        setStillToDo()
       })
 
       document.getElementById('kk-splitter-input').value = ''
@@ -499,8 +561,11 @@ function main() {
             okLabel: 'OK',
             destroyAfterClosing: true
           }).show()
-          setStoredCounter(0)
-          setTotalLength([]) // the function expects an array and takes its length, so we're passing an empty array to set the length to 0
+          ids = []
+          currentPosition = 0
+
+          setTotalLength()
+          setStillToDo(true)
         })
       }
     })
