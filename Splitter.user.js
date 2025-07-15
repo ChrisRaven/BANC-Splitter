@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Splitter for BANC
-// @namespace    KrzysztofKruk-BANC
-// @version      0.2
+// @namespace    KrzysztofKruk-FlyWire
+// @version      0.3
 // @description  Splits large list of IDs to more managable batches
 // @author       Krzysztof Kruk
 // @match        https://spelunker.cave-explorer.org/*
@@ -21,6 +21,8 @@ let batchSize = 20
 let numberOfSaved = 0
 let refreshEvery = 100
 let ids = []
+const numberOfPreloadedBatches = 5
+let nextButton, prevButton
 
 function addCss() {
   Dock.addCss(/*css*/`
@@ -178,12 +180,12 @@ function addNextButton() {
   nextButtonWrapper.id = 'kk-splitter-next-wrapper'
   nextButtonWrapper.draggable = true
 
-  const prevButton = document.createElement('button')
+  prevButton = document.createElement('button')
   prevButton.id = 'kk-splitter-prev'
   prevButton.innerHTML = 'Prev'
   prevButton.addEventListener('contextmenu', e => e.preventDefault())
 
-  const nextButton = document.createElement('button')
+  nextButton = document.createElement('button')
   nextButton.id = 'kk-splitter-next-batch'
   nextButton.innerHTML = 'Next (<span id="kk-splitter-next-batch-batch-number">0</span>)<br /><span id="kk-splitter-next-batch-total-counter">[?]</span>'
   nextButton.addEventListener('contextmenu', e => e.preventDefault())
@@ -249,11 +251,10 @@ function addNextButton() {
 
     }
     else {
-      const numberOfPreloadedBatches = 2
       setStillToDo()
-      const nextBatch = ids.slice(currentEndPosition, currentEndPosition + batchSize * numberOfPreloadedBatches) // preloading dla dwóch następnych porcji
+      const nextBatch = ids.slice(currentEndPosition, currentEndPosition + batchSize * numberOfPreloadedBatches) // preloading dla "numberOfPreloadedBatches" następnych porcji
       hiddenLayer.layer_.displayState.segmentationGroupState.value.selectedSegments.clear()
-      if (nextBatch && nextBatch.length && clickCounter + numberOfPreloadedBatches <= refreshEvery) {
+      if (nextBatch && nextBatch.length && clickCounter + numberOfPreloadedBatches - 1 <= refreshEvery) {
         addIds(hiddenLayer, nextBatch)
       }
       addIds(viewer.selectedLayer.layer_, batch)
@@ -431,6 +432,15 @@ function main() {
     }).show()
   })
 
+  document.body.addEventListener('keyup', e => {
+    if ((e.key === 'x' || e.key === 'X') && !e.ctrlKey && !e.shiftKey) {
+      nextButton.click()
+    }
+    else if ((e.key === 'd' || e.key === 'D') && !e.ctrlKey && !e.shiftKey) {
+      prevButton.click()
+    }
+  })
+
   function getSplitterDialogHtml() {
     return /*html*/`
       <textarea id="kk-splitter-input"></textarea>
@@ -502,7 +512,6 @@ function main() {
 
     document.getElementById('kk-splitter-add').addEventListener('click', () => {
       const newIds = getIds('kk-splitter-input')
-      ids = [...newIds]
       let stored
       storage.get('kk-splitter-stored').then(res => {
         stored = res['kk-splitter-stored'] || []
@@ -516,6 +525,7 @@ function main() {
 
         storage.set('kk-splitter-stored', stored)
       }).then(() => {
+        ids = [...stored]
         setTotalLength()
         setStillToDo()
       })
@@ -563,7 +573,7 @@ function main() {
           }).show()
           ids = []
           currentPosition = 0
-
+          storage.set('kk-splitter-current-position', currentPosition)
           setTotalLength()
           setStillToDo(true)
         })
